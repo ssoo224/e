@@ -1,0 +1,337 @@
+import time, redis, os, json, re, requests, asyncio
+from pyrogram import Client, filters, idle
+import yt_dlp  # إضافة مكتبة اليوت
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup  # إضافة للأزرار
+
+# إعداد Redis
+r = redis.Redis('localhost', decode_responses=True)
+
+# إنشاء/تحميل معلومات البوت
+try:
+    from information import *
+    hmshelp = token.split(':')[0]
+    r.set(f'{hmshelp}botowner', owner_id)
+except Exception:
+    with open('information.py', 'w+') as f:
+        token = input('[+] Enter the bot token: ')
+        hmshelp = token.split(':')[0]
+        if not r.get(f'{hmshelp}botowner'):
+            owner_id = int(input('[+] Enter SUDO ID: '))
+            r.set(f'{hmshelp}botowner', owner_id)
+        else:
+            owner_id = int(r.get(f'{hmshelp}botowner'))
+        f.write(f'token = "{token}"\nowner_id = {owner_id}')
+
+# التأكد من وجود owner_id
+if not r.get(f'{hmshelp}botowner'):
+    owner_id = int(input('[+] Enter SUDO ID: '))
+    r.set(f'{hmshelp}botowner', owner_id)
+else:
+    owner_id = int(r.get(f'{hmshelp}botowner'))
+
+print('Database is being created...')
+
+# إعداد config.py
+to_config = f"""
+import redis
+r = redis.Redis('localhost', decode_responses=True)
+token = '{token}'
+hmshelp = token.split(':')[0]
+sudo_id = {owner_id}
+"""
+
+# جلب username البوت
+try:
+    username = requests.get(f"https://api.telegram.org/bot{token}/getMe").json()["result"]["username"]
+except Exception:
+    username = "UnknownBot"
+
+to_config += f"\nbotUsername = '{username}'"
+to_config += "\nfrom kvsqlite.sync import Client as DB"
+to_config += "\nytdb = DB('ytdb.sqlite')"
+to_config += "\nsounddb = DB('sounddb.sqlite')"
+to_config += "\nwsdb = DB('wsdb.sqlite')"
+
+with open('config.py', 'w+') as w:
+    w.write(to_config)
+
+print('Database is being sorted...')
+
+# تعريف البوت
+app = Client(
+    f'{hmshelp}r3d',
+    15263491,
+    'f6cf6c2263f1e933f24d86bf02311467',
+    bot_token=token,
+    plugins={"root": "Plugins"},
+)
+
+# إعدادات عامة
+if not r.get(f'{hmshelp}:botkey'):
+    r.set(f'{hmshelp}:botkey', '⇜')
+
+if not r.get(f'{hmshelp}botname'):
+    r.set(f'{hmshelp}botname', 'همس')
+
+if not r.get(f'{hmshelp}botchannel'):
+    r.set(f'{hmshelp}botchannel', 'vn1bot')
+
+# وظيفة البحث عن روابط
+def Find(text):
+    m = r"(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s!()\[\]{};:'\".,<>?«»“”‘’]))"
+    url = re.findall(m, text)
+    return [x[0] for x in url]
+
+# ========== بداية كود اليوت مع 10 محاولات ==========
+
+# إعدادات اليوت
+DOWNLOADS_DIR = "downloads/youtube"
+AUDIO_FORMAT = "mp3"
+AUDIO_QUALITY = "192"
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 ميجابايت
+MAX_DURATION = 1500  # 25 دقيقة بالثواني (25 * 60)
+MAX_ATTEMPTS = 10    # 10 محاولات
+
+# بصمة القناة
+CHANNEL_NAME = "𝗦𝗰𝗼𝗿 𝗖𝗵𝗮𝗻𝗻𝗲𝗹"
+CHANNEL_LINK = "https://t.me/unuez"
+CHANNEL_BUTTON = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🎵 𝗦𝗰𝗼𝗥 𝗖𝗵𝗮𝗻𝗻𝗲𝗹", url=CHANNEL_LINK)]
+])
+
+# إنشاء مجلد التحميلات
+if not os.path.exists(DOWNLOADS_DIR):
+    os.makedirs(DOWNLOADS_DIR)
+    print("📁 تم إنشاء مجلد: downloads/youtube")
+
+def clean_filename(title):
+    """تنظيف اسم الملف"""
+    cleaned = re.sub(r'[<>:"/\\|?*]', '', title)
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned[:50].strip()
+
+def parse_duration(duration_str):
+    """تحويل مدة النص إلى ثواني"""
+    try:
+        if not duration_str or duration_str == 'غير معروف':
+            print(f"⚠️ مدة غير معروفة: {duration_str}")
+            return 999999
+        
+        print(f"⏱️ تحليل المدة: {duration_str}")
+        parts = duration_str.split(':')
+        if len(parts) == 2:  # دقائق:ثواني
+            seconds = int(parts[0]) * 60 + int(parts[1])
+            print(f"📊 مدة ثنائية: {seconds} ثانية")
+            return seconds
+        elif len(parts) == 3:  # ساعات:دقائق:ثواني
+            seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+            print(f"📊 مدة ثلاثية: {seconds} ثانية")
+            return seconds
+        else:
+            print(f"⚠️ تنسيق غير متوقع: {parts}")
+            return 999999
+    except Exception as e:
+        print(f"❌ خطأ في تحليل المدة: {e}")
+        return 999999
+
+def search_youtube_multiple(query, limit=MAX_ATTEMPTS):
+    """البحث عن عدة نتائج في يوتيوب"""
+    try:
+        print(f"🔍 البحث عن {limit} نتائج لـ: {query}")
+        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'extract_flat': True}) as ydl:
+            search_results = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+            
+            if search_results and 'entries' in search_results:
+                videos = []
+                for idx, video in enumerate(search_results['entries']):
+                    if video:
+                        duration_raw = video.get('duration_string', 'غير معروف')
+                        duration_seconds = parse_duration(duration_raw)
+                        video_info = {
+                            'index': idx + 1,
+                            'title': video.get('title', 'غير معروف'),
+                            'link': f"https://www.youtube.com/watch?v={video.get('id', '')}",
+                            'duration': duration_raw,
+                            'duration_seconds': duration_seconds,
+                            'channel': video.get('channel', 'غير معروف'),
+                        }
+                        videos.append(video_info)
+                        print(f"  {idx+1}. {video_info['title']} - {video_info['duration']}")
+                
+                print(f"✅ تم العثور على {len(videos)} نتائج")
+                return videos
+            else:
+                print("❌ مافي نتائج")
+                return []
+    except Exception as e:
+        print(f"❌ خطأ بحث: {e}")
+        return []
+
+async def try_download_audio(video_info):
+    """محاولة تحميل الصوت"""
+    try:
+        print(f"\n📥 محاولة {video_info['index']}: {video_info['title']}")
+        print(f"   المدة: {video_info['duration']} ({video_info['duration_seconds']} ثانية)")
+        
+        # تحقق من المدة أولاً
+        if video_info['duration_seconds'] > MAX_DURATION:
+            print(f"   ⏱️ مرفوض: المدة طويلة > 25 دقيقة")
+            return None, "مدة طويلة"
+        
+        print(f"   ✅ المدة مناسبة")
+        
+        safe_title = clean_filename(video_info['title'])
+        filename = f"{safe_title}.{AUDIO_FORMAT}"
+        filepath = os.path.join(DOWNLOADS_DIR, filename)
+        
+        if os.path.exists(filepath):
+            print(f"   ✅ الملف موجود مسبقاً")
+            return filepath, "موجود"
+        
+        print(f"   ⬇️ جاري التحميل...")
+        
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': AUDIO_FORMAT,
+                'preferredquality': AUDIO_QUALITY,
+            }],
+            'outtmpl': os.path.join(DOWNLOADS_DIR, f'{safe_title}.%(ext)s'),
+            'quiet': True,
+        }
+        
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).download([video_info['link']]))
+        
+        if os.path.exists(filepath):
+            print(f"   ✅ تم التحميل بنجاح")
+            return filepath, "نجاح"
+        else:
+            print(f"   ❌ فشل التحميل")
+            return None, "فشل"
+    except Exception as e:
+        error = str(e)
+        print(f"   ❌ خطأ: {error[:100]}")
+        if "private" in error.lower() or "unavailable" in error.lower():
+            return None, "محمي"
+        return None, f"خطأ"
+
+@app.on_message(filters.text)
+async def youtube_command(client, message):
+    """معالجة أمر يوت - مع 10 محاولات خلف الكواليس"""
+    print("🔥🔥🔥 دالة اليوت اشتغلت! 🔥🔥🔥")
+    try:
+        text = message.text.strip()
+        if not text.startswith('يوت'):
+            return
+        
+        song_name = text[3:].strip()
+        if not song_name:
+            await message.reply_text("❌ اكتب اسم الاغنية بعد يوت", reply_markup=CHANNEL_BUTTON)
+            return
+        
+        print(f"\n📨 أمر جديد من {message.from_user.id if message.from_user else 'غير معروف'}: {text}")
+        
+        # رسالة واحدة فقط للمستخدم
+        status_msg = await message.reply_text(
+            f"🔍 جاري البحث والتحميل...\n{song_name}",
+            reply_markup=CHANNEL_BUTTON
+        )
+        
+        # بحث عن 10 نتائج
+        print(f"🔎 بدء البحث عن: {song_name}")
+        videos = await asyncio.get_event_loop().run_in_executor(None, search_youtube_multiple, song_name)
+        
+        if not videos:
+            print("❌ مافي نتائج للبحث")
+            await status_msg.edit_text("❌ ما لقيت نتائج للبحث", reply_markup=CHANNEL_BUTTON)
+            return
+        
+        print(f"\n🔄 بدء تجربة {len(videos)} نتائج...")
+        
+        # جرب كل فيديو بالترتيب
+        success = False
+        attempts = 0
+        reasons = []
+        
+        for video in videos:
+            attempts += 1
+            
+            # جرب التحميل
+            result, reason = await try_download_audio(video)
+            reasons.append(f"{attempts}. {reason}")
+            
+            if result:  # نجاح التحميل
+                file_size = os.path.getsize(result)
+                print(f"📦 حجم الملف: {file_size // 1024 // 1024}MB")
+                
+                if file_size <= MAX_FILE_SIZE:
+                    print(f"✅ نجاح في المحاولة {attempts}")
+                    
+                    # مسح رسالة الحالة
+                    await status_msg.delete()
+                    
+                    # إرسال الصوت
+                    with open(result, 'rb') as audio:
+                        await message.reply_audio(
+                            audio=audio,
+                            title=video['title'][:50],
+                            performer=video['channel'],
+                            duration=video['duration_seconds'] if video['duration_seconds'] < 1000 else None,
+                            reply_markup=CHANNEL_BUTTON
+                        )
+                    
+                    os.remove(result)
+                    success = True
+                    break
+                else:
+                    print(f"⚠️ ملف كبير: {file_size // 1024 // 1024}MB > 50MB")
+                    os.remove(result)
+                    continue
+        
+        if not success:
+            # كل المحاولات فشلت
+            print(f"❌ جميع المحاولات فشلت: {', '.join(reasons)}")
+            await status_msg.edit_text(
+                "❌ ما لقيت اغنية مناسبة للتحميل\n"
+                "المدة المطلوبة: أقل من 25 دقيقة",
+                reply_markup=CHANNEL_BUTTON
+            )
+            
+    except Exception as e:
+        print(f"❌ خطأ يوت: {e}")
+        try:
+            await message.reply_text("❌ صار خطأ غير متوقع", reply_markup=CHANNEL_BUTTON)
+        except:
+            pass
+
+# ========== نهاية كود اليوت ==========
+
+# تحميل جميع الـ Plugins
+print("📂 جاري تحميل الـ Plugins...")
+try:
+    import Plugins
+    print("✅ تم تحميل جميع الـ Plugins بنجاح")
+except Exception as e:
+    print(f"⚠️ خطأ في تحميل الـ Plugins: {e}")
+
+# تشغيل البوت
+try:
+    app.start()
+except Exception as e:
+    print(f"❌ فشل تشغيل البوت: {e}")
+    exit()
+
+print('🇸🇦 Bot is running. Send /start')
+
+# إرسال رسالة للقناة DevGroup إذا موجودة
+if r.get(f'DevGroup:{hmshelp}'):
+    dev_group_id = int(r.get(f'DevGroup:{hmshelp}'))
+    try:
+        app.send_message(dev_group_id, "تم تشغيل البوت بنجاح ✔️")
+    except:
+        pass
+
+# تشغيل idle للحفاظ على البوت شغال
+idle()
