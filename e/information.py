@@ -1,0 +1,2 @@
+token = "8650990801:AAFnanKsGXF7D9_znW9sxMtHzZXYD8Nb6Fg"
+owner_id = 7115002714
